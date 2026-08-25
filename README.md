@@ -49,6 +49,88 @@ growing conversation; v3 restarts at every step from a condensed restatement of 
 before (its `REVISED_STEP_*` prompts) to keep the context small. `chained.py` picks this up
 from the prompt module rather than needing a flag.
 
+### The five flows
+
+**`chained.py`** — four prompts in sequence, each consuming the previous reply. Every step is
+cached, so a re-run resumes rather than repeating work.
+
+```mermaid
+flowchart LR
+    O[opinion] --> S1
+    S1[1 · motions] -->|reply| S2[2 · issues]
+    S2 -->|reply| S3[3 · argument trees]
+    S3 -->|reply| S4[4 · disputes]
+    S4 --> OUT[(output.jsonl)]
+    S1 -.-> C[(step cache)]
+    S2 -.-> C
+    S3 -.-> C
+    S4 -.-> C
+    C -.->|resume| S1
+```
+
+With `--prompts v2` or `v4` the conversation accumulates: step 4 replays all seven turns.
+With `--prompts v3` each step restarts from a condensed restatement of the step before, so the
+context stays at three turns no matter how deep the chain goes.
+
+```mermaid
+flowchart LR
+    subgraph v2["v2 / v4 · accumulate"]
+        direction LR
+        A1[p1] --> A2[+ reply + p2] --> A3[+ reply + p3] --> A4[+ reply + p4<br/>7 turns]
+    end
+    subgraph v3["v3 · compact"]
+        direction LR
+        B1[p1] --> B2[REVISED_1<br/>+ reply + p2] --> B3[REVISED_2<br/>+ reply + p3] --> B4[REVISED_3<br/>+ reply + p4<br/>3 turns]
+    end
+```
+
+**`single_prompt.py`** — the whole task in one call, run twice over the corpus to test whether
+the category-E catch-all helps or hurts.
+
+```mermaid
+flowchart LR
+    O[opinion] --> C1[context1<br/>categories A–E]
+    O --> C2[context2<br/>categories A–D only]
+    C1 --> R1[(with_E.csv)]
+    C2 --> R2[(no_E.csv)]
+```
+
+**`batch.py`** — the same four prompts, but the Batch API has no reply to chain onto, so all
+four go out in a single request per opinion at the lower batch rate.
+
+```mermaid
+flowchart LR
+    O[opinions] --> F[format<br/>one request per case] --> IN[(batch_input.jsonl)]
+    IN --> U[upload + submit] --> P{poll every 30s}
+    P -->|in progress| P
+    P -->|completed| D[download] --> OUT[(batch_output.jsonl)]
+    P -->|failed| E[report errors]
+```
+
+**`interview.py`** — no chain at all. One Gemini chat session per opinion, six fixed questions
+asked in order, each answered with the opinion and the earlier answers still in context.
+
+```mermaid
+flowchart LR
+    O[opinion] --> S[chat session<br/>+ preamble]
+    S --> Q1[1 · is it a<br/>language dispute?] --> Q2[2 · disputed phrase] --> Q3[3 · contract excerpt]
+    Q3 --> Q4[4 · plaintiff reading] --> Q5[5 · defendant reading] --> Q6[6 · who won]
+    Q6 --> OUT[(gemini_output.jsonl)]
+```
+
+**`summarize.py`** — for opinions past the context window: split on numbered section headings,
+then fold each section into a running summary.
+
+```mermaid
+flowchart LR
+    O[long opinion] --> CH[split on<br/>section headings]
+    CH --> S1[section 1] --> SUM((summarize))
+    CH --> S2[section 2] --> SUM
+    CH --> SN[section n] --> SUM
+    SUM -->|running summary<br/>fed back in| SUM
+    SUM --> OUT[condensed opinion]
+```
+
 ### Prompt versioning
 
 Every prompt is a named constant in `prompts/`, imported explicitly by the script

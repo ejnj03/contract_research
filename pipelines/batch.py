@@ -1,7 +1,7 @@
 """Batch API pipeline: format the four flat prompts as requests, then submit them.
 
-Each step is sent as a standalone request (no chaining), which is what makes the
-run eligible for the Batch API's lower rate. Formatting and submission are one
+The Batch API has no reply to chain onto, so all four steps go out in a single
+request per opinion, at the lower batch rate. Formatting and submission are one
 command:
 
     python -m pipelines.batch
@@ -23,15 +23,14 @@ def to_gpt_input(model, max_tokens, file_name):
     with open(file_name, 'w') as f:
         for number, input_sample in enumerate(samples):
             if input_sample["text"] != "nan":
-                content = {"role": "user", "content": context + "opinion_text = " + input_sample["text"]}
+                content = "\nopinion_text = " + input_sample["text"].strip()
                 citation = input_sample["citation"]
-                
-                # Construct the message dictionary
+
+                # The Batch API cannot chain: there is no reply to feed into the
+                # next step, so all four steps go out as one request.
                 messages = [
-                    {"role": "user", "content": part_1.strip() + content.strip()},
-                    {"role": "user", "content": part_2.strip() + content.strip()},
-                    {"role": "user", "content": part_3.strip() + content.strip()}
-                    #{"role": "user", "content": question_7.strip()},
+                    {"role": "user", "content": part.strip() + content}
+                    for part in (part_1, part_2, part_3, part_4)
                 ]
                 
                 # Construct the full JSON object
