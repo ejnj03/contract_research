@@ -4,7 +4,7 @@ LLM pipelines for extracting **contract-interpretation arguments** from U.S. fed
 opinions. Given an opinion, the models identify the disputed contractual language (a *Locus*),
 who argued about it (plaintiff / defendant / court), and what *type* of interpretive argument
 was made, emitting structured JSON. The label set depends on the prompt version — see
-[the final label](#the-final-label-which-differs-by-prompt-version).
+[comparing runs across versions](#comparing-runs-across-versions).
 
 ## Contents
 
@@ -13,19 +13,17 @@ was made, emitting structured JSON. The label set depends on the prompt version 
 - [Data](#data)
 - [Running](#running)
 - [How an opinion becomes structured JSON](#how-an-opinion-becomes-structured-json)
-  - [One prompt, or four chained steps](#one-prompt-or-four-chained-steps)
-  - [From motion to labeled argument](#from-motion-to-labeled-argument)
+  - [`v1`: define the terms, then classify](#v1-define-the-terms-then-classify)
+  - [`v2` `v3` `v4`: decompose the dispute](#v2-v3-v4-decompose-the-dispute)
     - [Step 1: the motions the court ruled on](#step-1-the-motions-the-court-ruled-on)
     - [Step 2: issues decompose into a forest](#step-2-issues-decompose-into-a-forest)
     - [Step 3: each leaf grows an argument tree](#step-3-each-leaf-grows-an-argument-tree)
     - [Step 4: pruning to contract-language disputes](#step-4-pruning-to-contract-language-disputes)
-    - [The final label, which differs by prompt version](#the-final-label-which-differs-by-prompt-version)
-  - [Each pipeline, end to end](#each-pipeline-end-to-end)
-    - [`chained.py`: four steps that resume](#chainedpy-four-steps-that-resume)
-    - [`single_prompt.py`: one call, run twice](#single_promptpy-one-call-run-twice)
-    - [`batch.py`: four steps in one request](#batchpy-four-steps-in-one-request)
-    - [`interview.py`: six questions in one session](#interviewpy-six-questions-in-one-session)
-    - [`summarize.py`: folding a long opinion down](#summarizepy-folding-a-long-opinion-down)
+    - [How the three variants differ](#how-the-three-variants-differ)
+  - [`qa_questions`: ask for the schema directly](#qa_questions-ask-for-the-schema-directly)
+  - [`summarization`: fold a long opinion down](#summarization-fold-a-long-opinion-down)
+  - [Comparing runs across versions](#comparing-runs-across-versions)
+  - [How each prompt is delivered](#how-each-prompt-is-delivered)
   - [Why model and prompt version are flags, not files](#why-model-and-prompt-version-are-flags-not-files)
   - [Which prompt each pipeline runs](#which-prompt-each-pipeline-runs)
 
@@ -106,42 +104,81 @@ a few cases before committing to a full run.
 
 ## How an opinion becomes structured JSON
 
-### One prompt, or four chained steps
+Four prompt families attack the same task with different decompositions. The prompt decides the
+reasoning; the pipeline only decides how it is delivered. So the sections below are organised by
+prompt, and each one opens with the steps that prompt actually asks for.
 
-Two families of pipelines share the same task:
+### `v1`: define the terms, then classify
 
-1. **Single prompt** (`pipelines/single_prompt.py`) — one long instruction defining Contract,
-   Locus, and argument categories A–E; the model returns the full JSON array in one call. It
-   runs each opinion twice, with and without category E (the "fits none of A–D" catch-all), as
-   an ablation on whether that escape hatch helps.
-2. **Chained steps** (`pipelines/chained.py`) — four prompts run in sequence, each consuming
-   the previous output: extract the motions, derive the issues per motion, build the argument
-   trees, then pick out the disputes that turn on contract language and label them. The letters
-   are not shared: `v2` and `v4` label with the requirement text rather than A–E, and `v3`'s
-   A–D are defined differently from `v1`'s.
+Three instructions in a single prompt. It defines its vocabulary first — what counts as a
+*Contract*, what counts as a *Locus* — and only then asks for arguments, so the classification
+has something precise to bind to.
 
-`pipelines/interview.py` drops the chain entirely and asks six fixed questions in one Gemini
-chat session instead. `pipelines/summarize.py` handles opinions that exceed the context window
-by chunking on numbered section headings and summarizing recursively before extraction.
+```mermaid
+flowchart LR
+    O["opinion"] --> D1["1 · define Contract<br/>from the court's own words"]
+    D1 --> D2["2 · define Locus<br/>word, phrase, or clause"]
+    D2 --> D3["3 · classify every argument<br/>about a Locus"]
+    D3 --> J[("JSON array<br/>one row per argument")]
+```
 
-### From motion to labeled argument
+Step 3 is a decision tree. A through D are meant to be mutually exclusive, so an argument is
+sorted into whichever one it fits; E catches whatever fits none of them:
 
-The chain is four steps, but what moves between them is a forest. Steps 2 and 3 are recursive:
-they keep expanding until nothing is left to expand.
+```mermaid
+flowchart TD
+    S["argument about<br/>contract language"] --> Q1{"promotes a specific<br/>reading?"}
+    Q1 -->|yes| A["A"]
+    Q1 -->|no| Q2{"asserts ambiguity,<br/>or its absence?"}
+    Q2 -->|yes| B["B"]
+    Q2 -->|no| Q3{"establishes the rule<br/>that should govern?"}
+    Q3 -->|yes| C["C"]
+    Q3 -->|no| Q4{"reads it to avoid<br/>inconsistency elsewhere?"}
+    Q4 -->|yes| D["D"]
+    Q4 -->|no| E["E · none of the above"]
+```
+
+`v1` ships as two variants, and `single_prompt.py` runs both over the corpus: `context1` as
+drawn, `context2` with the E leaf deleted so every argument is forced into A–D. That is the
+ablation — whether the escape hatch earns its place, or just absorbs arguments that belong in a
+real category.
+
+```mermaid
+flowchart LR
+    O["opinion"] --> C1["context1 · A–E"] --> R1[("with_E.csv")]
+    O --> C2["context2 · A–D"] --> R2[("no_E.csv")]
+```
+
+### `v2` `v3` `v4`: decompose the dispute
+
+Four steps, each written as a function to evaluate over the previous step's result. Rather than
+asking for arguments directly, they reconstruct the court's reasoning first and only look for
+contract language at the very end.
+
+```mermaid
+flowchart LR
+    O["opinion"] --> S1["1 · Motions + Issues<br/>what was ruled on"]
+    S1 --> S2["2 · Decompose<br/>issues → sub-issues → leaves"]
+    S2 --> S3["3 · Crossfire<br/>argument tree per leaf"]
+    S3 --> S4["4 · Type_dispute<br/>keep the contract-language ones"]
+    S4 --> J[("one record<br/>per disputed word")]
+```
+
+Steps 2 and 3 are recursive, and what moves between them is a forest, not a list.
 
 #### Step 1: the motions the court ruled on
 
 The root of every tree. The model extracts each procedural action the court decides — the
-action and the party that filed it, like *Defendants' Motion to Dismiss*. An opinion on a
-trial rather than a motion yields the plaintiff's claims instead, and cross-motions for
-summary judgment collapse to a single *Motion for Summary Judgment*.
+action and the party that filed it, like *Defendants' Motion to Dismiss*. An opinion on a trial
+rather than a motion yields the plaintiff's claims instead, and cross-motions for summary
+judgment collapse to a single *Motion for Summary Judgment*.
 
 #### Step 2: issues decompose into a forest
 
-Each issue is broken down until it bottoms out. For every issue, the model asks what
-sub-issues, burdens of proof, or legal standards the court says it is contingent on, and
-recurses. An issue with no sub-issues is terminal and joins `leaves` — the frontier that step 3
-works on. One tree per motion.
+Each issue is broken down until it bottoms out. For every issue, the model asks what sub-issues,
+burdens of proof, or legal standards the court says it is contingent on, and recurses. An issue
+with no sub-issues is terminal and joins `leaves` — the frontier step 3 works on. One tree per
+motion.
 
 ```mermaid
 flowchart TD
@@ -155,14 +192,15 @@ flowchart TD
     class L1,L2,L3 leaf
 ```
 
-Thick borders are leaves. Everything above them is scaffolding the court had to work through
-to get there.
+Thick borders are leaves. Everything above them is scaffolding the court had to work through to
+get there.
 
 #### Step 3: each leaf grows an argument tree
 
 The sides alternate as it deepens. Each party's position sprouts two kinds of edge: `support`
-(the same party backing its own claim) and `refutations` (the opponent attacking it). The recursion follows both, and the party flips on every
-refutation — so depth is argumentative depth, and the sides interleave.
+(the same party backing its own claim) and `refutations` (the opponent attacking it). The
+recursion follows both, and the party flips on every refutation — so depth is argumentative
+depth, and the sides interleave.
 
 ```mermaid
 flowchart TD
@@ -178,138 +216,122 @@ flowchart TD
 
 #### Step 4: pruning to contract-language disputes
 
-Of all those leaves, it keeps only the ones where the disagreement is about
-contract language — a reading of a phrase, whether a phrase is ambiguous, or what rule should
-govern the reading. Everything else is discarded.
+Of all those leaves, keep only the ones where the disagreement is about contract language, and
+label each with which kind it is. Two further gates drop more: the disputed word must appear
+word for word in the contract, and the court must have stated a stance. Everything else is
+discarded silently.
 
-#### The final label, which differs by prompt version
+#### How the three variants differ
 
-Every version ends by labeling each surviving dispute, but they do not agree on the label set —
-and this is the one place where reading the diagrams as interchangeable would mislead you.
+Same four steps, three deliveries:
 
-| Version | Run by | How the label is expressed |
-|---|---|---|
-| `v1` `context1` | `single_prompt.py` | Letters **A–E**, with E a catch-all that carries a free-text description |
-| `v1` `context2` | `single_prompt.py` | Letters **A–D**; the E escape hatch is deleted |
-| `v2` | `chained.py --prompts v2` | No letters. `argument_type` is set to the **full requirement text** the dispute satisfies, from four options |
-| `v3` | `chained.py --prompts v3` | Letters **A–D**, but defined differently from v1's |
-| `v4` | `chained.py --prompts v4`, `batch.py` | No letters, **three** requirements — v2's fourth (contradiction between two parts of a contract) is missing |
-
-So the answer to "which categories does this run use" is not the same across the chain, and
-`v2` and `v4` do not use letters at all: they echo back the requirement sentence itself.
-
-The lettered scheme, as `v1` defines it, is a decision tree. A through D are meant to be
-mutually exclusive, so an argument is sorted into whichever one it fits; E catches whatever
-fits none of them:
-
-```mermaid
-flowchart TD
-    S["argument about<br/>contract language"] --> Q1{"promotes a specific<br/>reading?"}
-    Q1 -->|yes| A["A"]
-    Q1 -->|no| Q2{"asserts ambiguity,<br/>or its absence?"}
-    Q2 -->|yes| B["B"]
-    Q2 -->|no| Q3{"establishes the rule<br/>that should govern?"}
-    Q3 -->|yes| C["C"]
-    Q3 -->|no| Q4{"reads it to avoid<br/>inconsistency elsewhere?"}
-    Q4 -->|yes| D["D"]
-    Q4 -->|no| E["E · none of the above"]
-```
-
-`single_prompt.py` runs this tree twice per opinion: once as drawn, and once with the E leaf
-deleted so every argument is forced into A–D. That is the ablation — whether the escape hatch
-earns its place, or just absorbs arguments that belong in a real category.
-
-### Each pipeline, end to end
-
-#### `chained.py`: four steps that resume
-
-Four prompts in sequence, each consuming the previous reply. Every step is cached, so a re-run
-resumes rather than repeating work.
+| | Wording | Conversation | Label |
+|---|---|---|---|
+| `v2` | canonical | accumulates — step 4 replays all seven turns | four requirement sentences |
+| `v3` | reworded | restarts each step from a condensed restatement | letters A–D |
+| `v4` | flattened to one line per step | none — all four sent at once | three requirement sentences |
 
 ```mermaid
 flowchart LR
-    O[opinion] --> S1
-    S1[1 · motions] -->|reply| S2[2 · issues]
-    S2 -->|reply| S3[3 · argument trees]
-    S3 -->|reply| S4[4 · disputes]
-    S4 --> OUT[(output.jsonl)]
-    S1 -.-> C[(step cache)]
+    subgraph acc["v2 · accumulate"]
+        direction LR
+        A1["p1"] --> A2["+ reply + p2"] --> A3["+ reply + p3"] --> A4["+ reply + p4<br/>7 turns"]
+    end
+    subgraph com["v3 · compact"]
+        direction LR
+        B1["p1"] --> B2["REVISED_1<br/>+ reply + p2"] --> B3["REVISED_2<br/>+ reply + p3"] --> B4["REVISED_3<br/>+ reply + p4<br/>3 turns"]
+    end
+```
+
+### `qa_questions`: ask for the schema directly
+
+Six fixed questions in one chat session, no decomposition at all. Question 1 is a gate; the rest
+fill in the same fields the chain arrives at by building trees.
+
+```mermaid
+flowchart LR
+    O["opinion"] --> Q1{"1 · is this an<br/>interpretation dispute?"}
+    Q1 -->|0| X["stop"]
+    Q1 -->|1| Q2["2 · disputed phrase"]
+    Q2 --> Q3["3 · contract excerpt"] --> Q4["4 · plaintiff's reading"]
+    Q4 --> Q5["5 · defendant's reading"] --> Q6["6 · who won, and why"]
+```
+
+Each answer maps onto a step-4 field: Q2 to `disputed_word`, Q3 to `contract_excerpt`, Q4 to
+`Plaintiff`, Q5 to `Defendant`, Q6 to `Court Opinion`. Q1 has no counterpart — it is the only
+per-opinion yes/no in the repo, where the chain filters dispute by dispute instead.
+
+Q2 carries the disambiguation rule the chain handles structurally: if the disputed term is
+explicitly defined in the contract and the real argument is over a term *inside that
+definition*, answer with the inner term only.
+
+### `summarization`: fold a long opinion down
+
+Not an extraction prompt — a preprocessor for opinions past the context window. Sections are
+folded one at a time into a running summary, each call seeing the summary so far plus one new
+section.
+
+```mermaid
+flowchart LR
+    O["long opinion"] --> CH["split on<br/>section headings"]
+    CH --> S1["section 1"] --> SUM(("summarize"))
+    CH --> S2["section 2"] --> SUM
+    CH --> SN["section n"] --> SUM
+    SUM -->|running summary<br/>fed back in| SUM
+    SUM --> OUT["condensed opinion"]
+```
+
+### Comparing runs across versions
+
+The versions do not agree on the label set, and they do not agree on the record shape. Both bite
+when comparing outputs:
+
+| Version | Run by | Label |
+|---|---|---|
+| `v1` `context1` | `single_prompt.py` | Letters **A–E**, E carrying a free-text description |
+| `v1` `context2` | `single_prompt.py` | Letters **A–D**, the E branch removed |
+| `v2` | `chained.py --prompts v2` | No letters — the **full requirement sentence**, of four |
+| `v3` | `chained.py --prompts v3` | Letters **A–D**, defined differently from `v1`'s |
+| `v4` | `chained.py --prompts v4`, `batch.py` | No letters, and only **three** requirements — `v2`'s fourth, on two parts of a contract contradicting each other, is absent |
+
+| | Record shape |
+|---|---|
+| `v1` | One row **per argument**, with `argument_position` naming who made it |
+| `v2` `v3` `v4` | One record **per disputed word**, both sides already paired |
+
+So `v1` gives unpaired arguments you would have to group by `disputed_word` yourself, and the
+chain gives the pairing but only one dispute per word — a second dispute over the same word
+overwrites the first, since `disputed_word` is the key.
+
+### How each prompt is delivered
+
+The pipelines are transport. `chained.py` caches every step by `(citation, model, step)`, so an
+interrupted run resumes where it stopped and never pays for a step twice:
+
+```mermaid
+flowchart LR
+    S1["1"] -->|reply| S2["2"] -->|reply| S3["3"] -->|reply| S4["4"] --> OUT[("output.jsonl")]
+    S1 -.-> C[("step cache")]
     S2 -.-> C
     S3 -.-> C
     S4 -.-> C
     C -.->|resume| S1
 ```
 
-With `--prompts v2` or `v4` the conversation accumulates: step 4 replays all seven turns.
-With `--prompts v3` each step restarts from a condensed restatement of the step before, so the
-context stays at three turns no matter how deep the chain goes.
+`batch.py` trades chaining for the lower batch rate — there is no reply to chain onto, so all
+four steps go out in one request per opinion:
 
 ```mermaid
 flowchart LR
-    subgraph v2["v2 / v4 · accumulate"]
-        direction LR
-        A1[p1] --> A2[+ reply + p2] --> A3[+ reply + p3] --> A4[+ reply + p4<br/>7 turns]
-    end
-    subgraph v3["v3 · compact"]
-        direction LR
-        B1[p1] --> B2[REVISED_1<br/>+ reply + p2] --> B3[REVISED_2<br/>+ reply + p3] --> B4[REVISED_3<br/>+ reply + p4<br/>3 turns]
-    end
-```
-
-#### `single_prompt.py`: one call, run twice
-
-The whole task in a single call, run twice over the corpus to test whether the category-E
-catch-all helps or hurts.
-
-```mermaid
-flowchart LR
-    O[opinion] --> C1[context1<br/>categories A–E]
-    O --> C2[context2<br/>categories A–D only]
-    C1 --> R1[(with_E.csv)]
-    C2 --> R2[(no_E.csv)]
-```
-
-#### `batch.py`: four steps in one request
-
-The same four prompts, but the Batch API has no reply to chain onto, so all four go out in a
-single request per opinion, at the lower batch rate.
-
-```mermaid
-flowchart LR
-    O[opinions] --> F[format<br/>one request per case] --> IN[(batch_input.jsonl)]
-    IN --> U[upload + submit] --> P{poll every 30s}
+    O["opinions"] --> F["format<br/>one request per case"] --> IN[("batch_input.jsonl")]
+    IN --> U["upload + submit"] --> P{"poll every 30s"}
     P -->|in progress| P
-    P -->|completed| D[download] --> OUT[(batch_output.jsonl)]
-    P -->|failed| E[report errors]
+    P -->|completed| D["download"] --> OUT[("batch_output.jsonl")]
+    P -->|failed| E["report errors"]
 ```
 
-#### `interview.py`: six questions in one session
-
-No chain at all. One Gemini chat session per opinion, six fixed questions asked in order, each
-answered with the opinion and the earlier answers still in context.
-
-```mermaid
-flowchart LR
-    O[opinion] --> S[chat session<br/>+ preamble]
-    S --> Q1[1 · is it a<br/>language dispute?] --> Q2[2 · disputed phrase] --> Q3[3 · contract excerpt]
-    Q3 --> Q4[4 · plaintiff reading] --> Q5[5 · defendant reading] --> Q6[6 · who won]
-    Q6 --> OUT[(gemini_output.jsonl)]
-```
-
-#### `summarize.py`: folding a long opinion down
-
-For opinions past the context window: split on numbered section headings, then fold each
-section into a running summary.
-
-```mermaid
-flowchart LR
-    O[long opinion] --> CH[split on<br/>section headings]
-    CH --> S1[section 1] --> SUM((summarize))
-    CH --> S2[section 2] --> SUM
-    CH --> SN[section n] --> SUM
-    SUM -->|running summary<br/>fed back in| SUM
-    SUM --> OUT[condensed opinion]
-```
+`single_prompt.py` and `interview.py` are plain loops over the corpus, one call and one session
+per opinion respectively. `summarize.py` runs standalone over long opinions.
 
 ### Why model and prompt version are flags, not files
 
