@@ -1,2 +1,17 @@
+# Data / outputs
 *.csv
 *.tsv
+*.jsonl
+batch.txt
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
