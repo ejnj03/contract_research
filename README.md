@@ -13,8 +13,8 @@ was made (categories A–E), emitting structured JSON.
 - [Running](#running)
 - [How it works](#how-it-works)
   - [The two approaches](#the-two-approaches)
-  - [What the steps produce](#what-the-steps-produce)
-  - [The five flows](#the-five-flows)
+  - [Diagram of decision flows](#what-the-steps-produce)
+  - [Diagram of architectures](#the-five-flows)
   - [Prompt version, model, transport](#prompt-version-model-transport)
   - [Prompt versioning](#prompt-versioning)
 
