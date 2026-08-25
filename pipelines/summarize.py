@@ -1,8 +1,9 @@
 import os
-from typing import List, Tuple, Optional
+from typing import Optional
 from openai import OpenAI
 from tqdm import tqdm
-from chunk_inputs import chunk_csv
+from lib.chunking import chunk_csv
+from prompts.summarization import SYSTEM_MESSAGE, INITIAL_SUMMARY, recursive_user_message
 
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
@@ -43,11 +44,11 @@ def summarize(text_dict: str,
     """
 
     # set system message
-    system_message_content = "This is a segment of a opinion text of a court case about contract disputes. Augment the summary by adding sections, subsections or points, or create a summary if there is no previous summary based on the segment, with the focus of identifying disputes that are either implicitly or directly dependent on the interpretation of certain phrases or words within a contract (there may be none). Specifically, either add to or create sections within the summary in the form: Section: A. key contention 1, (i) sub-contention 1, (a) details relevant to sub-contention 1, (ii) details relevant to A key contention 1, B. key contention 2, etc.; Make sure to include specific excerpts of the text that include details relevant to the different interpretations, if there are any."
+    system_message_content = SYSTEM_MESSAGE
     if additional_instructions is not None:
         system_message_content += f"\n\n{additional_instructions}"
 
-    accumulated_summaries = "None; This section is the first section of the opinion text."
+    accumulated_summaries = INITIAL_SUMMARY
     for part_name in tqdm(text_dict.keys()):
         ref_dict = {}
         if part_name == "DISCUSSION" or part_name == "ANALYSIS":
@@ -59,7 +60,9 @@ def summarize(text_dict: str,
             if summarize_recursively and accumulated_summaries:
                 # Creating a structured prompt for recursive summarization
                 accumulated_summaries_string = accumulated_summaries
-                user_message_content = f"Summary to augment:\n\n{accumulated_summaries_string}\n\nCurrent Segment's title/role within the Opinion Text: {subpart_name} \n\nCurrent Segment to reference/use to augment the Summary:\n\n{ref_dict[subpart_name]}"
+                user_message_content = recursive_user_message(
+                    accumulated_summaries_string, subpart_name, ref_dict[subpart_name]
+                )
             else:
                 # Directly passing the chunk for summarization without recursive context
                 user_message_content = ref_dict[subpart_name]

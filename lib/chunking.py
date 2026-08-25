@@ -1,5 +1,6 @@
-import pandas as pd
 import re
+
+from dataset import load_samples
 
 def chunk_text(input_text):
     # Dictionary to hold the sections
@@ -119,14 +120,10 @@ def chunk_text(input_text):
     return sections
 
 def chunk_csv():
-    labels_df = pd.read_csv('labels.csv') 
-    citations = labels_df['citation']
-    text_list = labels_df['text'].to_list()
-    citation_list = citations.to_list()
-    label_list = labels_df['corrected_labels'].to_list()
-    
-    # Process each sample by chunking the text and storing relevant info
-    samples = [{"citation": citation, "text": chunk_text(str(text)), "label": label} for citation, text, label in zip(citation_list, text_list, label_list)]
+    """Load the corpus and split each opinion into its numbered sections."""
+    samples = load_samples()
+    for sample in samples:
+        sample["text"] = chunk_text(sample["text"])
     return samples
 
 if __name__ == "__main__":
