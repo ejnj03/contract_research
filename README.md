@@ -11,12 +11,12 @@ was made (categories A–E), emitting structured JSON.
 - [Setup](#setup)
 - [Data](#data)
 - [Running](#running)
-- [How it works](#how-it-works)
-  - [The two approaches](#the-two-approaches)
-  - [Diagram of decision flows](#what-the-steps-produce)
-  - [Diagram of architectures](#the-five-flows)
-  - [Prompt version, model, transport](#prompt-version-model-transport)
-  - [Prompt versioning](#prompt-versioning)
+- [How an opinion becomes structured JSON](#how-an-opinion-becomes-structured-json)
+  - [One prompt, or four chained steps](#one-prompt-or-four-chained-steps)
+  - [From motion to labeled argument](#from-motion-to-labeled-argument)
+  - [Each pipeline, end to end](#each-pipeline-end-to-end)
+  - [Why model and prompt version are flags, not files](#why-model-and-prompt-version-are-flags-not-files)
+  - [Which prompt each pipeline runs](#which-prompt-each-pipeline-runs)
 
 ## Repository layout
 
@@ -93,9 +93,9 @@ python -m pipelines.summarize              # summarize long opinions
 Add `--help` to any of them for the available flags, and `--limit N` to `chained.py` to try
 a few cases before committing to a full run.
 
-## How it works
+## How an opinion becomes structured JSON
 
-### The two approaches
+### One prompt, or four chained steps
 
 Two families of pipelines share the same task:
 
@@ -111,7 +111,7 @@ Two families of pipelines share the same task:
 chat session instead. `pipelines/summarize.py` handles opinions that exceed the context window
 by chunking on numbered section headings and summarizing recursively before extraction.
 
-### What the steps produce
+### From motion to labeled argument
 
 The chain is four steps, but what moves between them is a forest. Steps 2 and 3 are recursive:
 they keep expanding until nothing is left to expand.
@@ -178,7 +178,7 @@ flowchart TD
 deleted so every argument is forced into A–D. That is the ablation — whether the escape hatch
 earns its place, or just absorbs arguments that belong in a real category.
 
-### The five flows
+### Each pipeline, end to end
 
 **`chained.py`** — four prompts in sequence, each consuming the previous reply. Every step is
 cached, so a re-run resumes rather than repeating work.
@@ -260,7 +260,7 @@ flowchart LR
     SUM --> OUT[condensed opinion]
 ```
 
-### Prompt version, model, transport
+### Why model and prompt version are flags, not files
 
 Three things vary across runs: the **prompt version**, the **model**, and the
 **transport** (how many calls, and whether they chain). Only transport changes the
@@ -281,15 +281,25 @@ growing conversation; v3 restarts at every step from a condensed restatement of 
 before (its `REVISED_STEP_*` prompts) to keep the context small. `chained.py` picks this up
 from the prompt module rather than needing a flag.
 
-### Prompt versioning
+### Which prompt each pipeline runs
 
-Every prompt is a named constant in `prompts/`, imported explicitly by the script
-that runs it:
+| Prompt module | What it is | Run by |
+|---|---|---|
+| `v1_single_prompt` | The whole task in one prompt, in two variants: `context1` (A–E) and `context2` (A–D) | `python -m pipelines.single_prompt` |
+| `v2_chained` | The four chained steps, canonical wording | `python -m pipelines.chained --prompts v2` |
+| `v3_chained_variant` | The same four steps reworded, plus `REVISED_STEP_*` for the compact strategy | `python -m pipelines.chained --prompts v3` |
+| `v4_flat_chained` | v2 flattened to one line per step | `python -m pipelines.chained --prompts v4`<br/>`python -m pipelines.batch` |
+| `qa_questions` | Preamble and the six fixed questions | `python -m pipelines.interview` |
+| `summarization` | System and user messages for recursive summarization | `python -m pipelines.summarize` |
+
+`v4` is the only module with two callers: `chained.py` sends its steps as a conversation,
+`batch.py` sends all four in one request. Everything else maps one-to-one.
+
+Each pipeline imports the constants it sends:
 
 ```python
 from prompts.v2_chained import part_1, part_2, part_3, part_4
 ```
 
-So the import line of any script tells you which prompt version that run used, and
-editing a prompt is a one-file diff that shows exactly which pipelines it affects.
-`prompts.VERSIONS` lists the four pipeline versions in order.
+So the import line records which wording a run used, and editing a prompt is a one-file diff
+that shows exactly which pipelines it affects.
