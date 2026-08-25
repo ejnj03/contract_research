@@ -14,7 +14,17 @@ was made (categories A–E), emitting structured JSON.
 - [How an opinion becomes structured JSON](#how-an-opinion-becomes-structured-json)
   - [One prompt, or four chained steps](#one-prompt-or-four-chained-steps)
   - [From motion to labeled argument](#from-motion-to-labeled-argument)
+    - [Step 1: the motions the court ruled on](#step-1-the-motions-the-court-ruled-on)
+    - [Step 2: issues decompose into a forest](#step-2-issues-decompose-into-a-forest)
+    - [Step 3: each leaf grows an argument tree](#step-3-each-leaf-grows-an-argument-tree)
+    - [Step 4: pruning to contract-language disputes](#step-4-pruning-to-contract-language-disputes)
+    - [The A–E labels](#the-ae-labels)
   - [Each pipeline, end to end](#each-pipeline-end-to-end)
+    - [`chained.py`: four steps that resume](#chainedpy-four-steps-that-resume)
+    - [`single_prompt.py`: one call, run twice](#single_promptpy-one-call-run-twice)
+    - [`batch.py`: four steps in one request](#batchpy-four-steps-in-one-request)
+    - [`interview.py`: six questions in one session](#interviewpy-six-questions-in-one-session)
+    - [`summarize.py`: folding a long opinion down](#summarizepy-folding-a-long-opinion-down)
   - [Why model and prompt version are flags, not files](#why-model-and-prompt-version-are-flags-not-files)
   - [Which prompt each pipeline runs](#which-prompt-each-pipeline-runs)
 
@@ -116,7 +126,16 @@ by chunking on numbered section headings and summarizing recursively before extr
 The chain is four steps, but what moves between them is a forest. Steps 2 and 3 are recursive:
 they keep expanding until nothing is left to expand.
 
-**Step 2 decomposes each issue until it bottoms out.** For every issue, the model asks what
+#### Step 1: the motions the court ruled on
+
+The root of every tree. The model extracts each procedural action the court decides — the
+action and the party that filed it, like *Defendants' Motion to Dismiss*. An opinion on a
+trial rather than a motion yields the plaintiff's claims instead, and cross-motions for
+summary judgment collapse to a single *Motion for Summary Judgment*.
+
+#### Step 2: issues decompose into a forest
+
+Each issue is broken down until it bottoms out. For every issue, the model asks what
 sub-issues, burdens of proof, or legal standards the court says it is contingent on, and
 recurses. An issue with no sub-issues is terminal and joins `leaves` — the frontier that step 3
 works on. One tree per motion.
@@ -136,9 +155,10 @@ flowchart TD
 Thick borders are leaves. Everything above them is scaffolding the court had to work through
 to get there.
 
-**Step 3 grows an argument tree under each leaf, alternating sides.** Each party's position
-sprouts two kinds of edge: `support` (the same party backing its own claim) and `refutations`
-(the opponent attacking it). The recursion follows both, and the party flips on every
+#### Step 3: each leaf grows an argument tree
+
+The sides alternate as it deepens. Each party's position sprouts two kinds of edge: `support`
+(the same party backing its own claim) and `refutations` (the opponent attacking it). The recursion follows both, and the party flips on every
 refutation — so depth is argumentative depth, and the sides interleave.
 
 ```mermaid
@@ -153,11 +173,15 @@ flowchart TD
     D -->|refutations| PR["plaintiff's rebuttal"]
 ```
 
-**Step 4 prunes.** Of all those leaves, it keeps only the ones where the disagreement is about
+#### Step 4: pruning to contract-language disputes
+
+Of all those leaves, it keeps only the ones where the disagreement is about
 contract language — a reading of a phrase, whether a phrase is ambiguous, or what rule should
 govern the reading. Everything else is discarded.
 
-**The A–E labels are themselves a decision tree.** A through D are meant to be mutually
+#### The A–E labels
+
+The categories are themselves a decision tree. A through D are meant to be mutually
 exclusive, so an argument is sorted into whichever one it fits; E catches whatever fits none of
 them. Drawn as a cascade of tests:
 
@@ -180,8 +204,10 @@ earns its place, or just absorbs arguments that belong in a real category.
 
 ### Each pipeline, end to end
 
-**`chained.py`** — four prompts in sequence, each consuming the previous reply. Every step is
-cached, so a re-run resumes rather than repeating work.
+#### `chained.py`: four steps that resume
+
+Four prompts in sequence, each consuming the previous reply. Every step is cached, so a re-run
+resumes rather than repeating work.
 
 ```mermaid
 flowchart LR
@@ -213,8 +239,10 @@ flowchart LR
     end
 ```
 
-**`single_prompt.py`** — the whole task in one call, run twice over the corpus to test whether
-the category-E catch-all helps or hurts.
+#### `single_prompt.py`: one call, run twice
+
+The whole task in a single call, run twice over the corpus to test whether the category-E
+catch-all helps or hurts.
 
 ```mermaid
 flowchart LR
@@ -224,8 +252,10 @@ flowchart LR
     C2 --> R2[(no_E.csv)]
 ```
 
-**`batch.py`** — the same four prompts, but the Batch API has no reply to chain onto, so all
-four go out in a single request per opinion at the lower batch rate.
+#### `batch.py`: four steps in one request
+
+The same four prompts, but the Batch API has no reply to chain onto, so all four go out in a
+single request per opinion, at the lower batch rate.
 
 ```mermaid
 flowchart LR
@@ -236,8 +266,10 @@ flowchart LR
     P -->|failed| E[report errors]
 ```
 
-**`interview.py`** — no chain at all. One Gemini chat session per opinion, six fixed questions
-asked in order, each answered with the opinion and the earlier answers still in context.
+#### `interview.py`: six questions in one session
+
+No chain at all. One Gemini chat session per opinion, six fixed questions asked in order, each
+answered with the opinion and the earlier answers still in context.
 
 ```mermaid
 flowchart LR
@@ -247,8 +279,10 @@ flowchart LR
     Q6 --> OUT[(gemini_output.jsonl)]
 ```
 
-**`summarize.py`** — for opinions past the context window: split on numbered section headings,
-then fold each section into a running summary.
+#### `summarize.py`: folding a long opinion down
+
+For opinions past the context window: split on numbered section headings, then fold each
+section into a running summary.
 
 ```mermaid
 flowchart LR
