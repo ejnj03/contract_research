@@ -1,3 +1,12 @@
+"""v2 - four chained prompts (canonical).
+
+part_1 Motions + Issues -> part_2 issue decomposition -> part_3 argument trees
+-> part_4 contract-language disputes. Each step consumes the previous response.
+
+Used by: versions/o1_structured_input.py, versions/step_4.py,
+         versions/gpt_4_turbo_unbatched.py
+"""
+
 part_1 = """
 Evaluate the results of the functions below for the given opinion_text, performing all the detailed steps in the 
 functions exactly as instructed, and give the fully evaluated output in the format:  "[RESPONSE] motions = Motions(opinion_text), 

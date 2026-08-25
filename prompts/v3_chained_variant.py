@@ -1,3 +1,11 @@
+"""v3 - four chained prompts, alternative wording of v2.
+
+Same four steps as v2 with reworded instructions, plus REVISED_STEP_* condensed
+restatements used when a cached earlier response is replayed instead of re-run.
+
+Used by: versions/structured_input_variant.py
+"""
+
 part_1 = """
 Evaluate the results of the functions below for the given opinion_text, performing all the detailed steps in the 
 functions exactly as instructed, and give the fully evaluated output in the format:  "[RESPONSE] motions = Motions(opinion_text), 
@@ -331,3 +339,14 @@ Type_dispute(debates):
 
         5. return Disputes; 
 """
+
+
+
+# Condensed restatement of step 1, used when a cached step-1 response is replayed.
+REVISED_STEP_1 = r'Identify and provide in your response motions, a set of specific occasions (procedural actions) and the motivating party (the party that filed the procedural action) that the court issues a decision on in opinion_text, and issues, a dictionary mapping motions to a set of issues that the court identifies as key to the making a judgment on the motion, extracted directly from the opinion_text (motion: Set(issues on the motion) for every motion in motions).'
+
+# Condensed restatement of step 2.
+REVISED_STEP_2 = r'Identify and provide updated_issues_dict, a dictionary with key as issue/burden of proof i, and value as the set of sub-issue(s) (issue(s)/burden of proof(s) that i is contingent upon. This is essentially an adjacency list representation of trees, one tree for each major issue in the opinion_text, where each of these major issues would be the root node of the respective trees. Then, identify and provide the leaf nodes of all trees as elements of the set leaves.'
+
+# Condensed restatement of step 3.
+REVISED_STEP_3 = r'Provide a nested dictionary that has a key corresponding to each issue i in the opinion_text that the defendant and plaintiff directly dispute over, and value as a dictionary with keys “defendant” and “plaintiff”; Each respective value for actor a should correspond to a edge-labeled directed graph (tree) represented as a set of tuples (parent, relation, child), where parent would correspond to the position that a (the actor that is specified as the key of this entry) takes on the issue i, relation (either “support” or “refutations”), and child the set of supporting claims made by actor a in support of the parent claim if relation is “\support\”, or the set of refutations made against the parent claim if relation is “refutations.”'
