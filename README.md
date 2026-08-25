@@ -3,7 +3,8 @@
 LLM pipelines for extracting **contract-interpretation arguments** from U.S. federal court
 opinions. Given an opinion, the models identify the disputed contractual language (a *Locus*),
 who argued about it (plaintiff / defendant / court), and what *type* of interpretive argument
-was made (categories A–E), emitting structured JSON.
+was made, emitting structured JSON. The label set depends on the prompt version — see
+[the final label](#the-final-label-which-differs-by-prompt-version).
 
 ## Contents
 
@@ -18,7 +19,7 @@ was made (categories A–E), emitting structured JSON.
     - [Step 2: issues decompose into a forest](#step-2-issues-decompose-into-a-forest)
     - [Step 3: each leaf grows an argument tree](#step-3-each-leaf-grows-an-argument-tree)
     - [Step 4: pruning to contract-language disputes](#step-4-pruning-to-contract-language-disputes)
-    - [The A–E labels](#the-ae-labels)
+    - [The final label, which differs by prompt version](#the-final-label-which-differs-by-prompt-version)
   - [Each pipeline, end to end](#each-pipeline-end-to-end)
     - [`chained.py`: four steps that resume](#chainedpy-four-steps-that-resume)
     - [`single_prompt.py`: one call, run twice](#single_promptpy-one-call-run-twice)
@@ -115,7 +116,9 @@ Two families of pipelines share the same task:
    an ablation on whether that escape hatch helps.
 2. **Chained steps** (`pipelines/chained.py`) — four prompts run in sequence, each consuming
    the previous output: extract the motions, derive the issues per motion, build the argument
-   trees, then pick out the disputes that turn on contract language.
+   trees, then pick out the disputes that turn on contract language and label them. The letters
+   are not shared: `v2` and `v4` label with the requirement text rather than A–E, and `v3`'s
+   A–D are defined differently from `v1`'s.
 
 `pipelines/interview.py` drops the chain entirely and asks six fixed questions in one Gemini
 chat session instead. `pipelines/summarize.py` handles opinions that exceed the context window
@@ -179,11 +182,25 @@ Of all those leaves, it keeps only the ones where the disagreement is about
 contract language — a reading of a phrase, whether a phrase is ambiguous, or what rule should
 govern the reading. Everything else is discarded.
 
-#### The A–E labels
+#### The final label, which differs by prompt version
 
-The categories are themselves a decision tree. A through D are meant to be mutually
-exclusive, so an argument is sorted into whichever one it fits; E catches whatever fits none of
-them. Drawn as a cascade of tests:
+Every version ends by labeling each surviving dispute, but they do not agree on the label set —
+and this is the one place where reading the diagrams as interchangeable would mislead you.
+
+| Version | Run by | How the label is expressed |
+|---|---|---|
+| `v1` `context1` | `single_prompt.py` | Letters **A–E**, with E a catch-all that carries a free-text description |
+| `v1` `context2` | `single_prompt.py` | Letters **A–D**; the E escape hatch is deleted |
+| `v2` | `chained.py --prompts v2` | No letters. `argument_type` is set to the **full requirement text** the dispute satisfies, from four options |
+| `v3` | `chained.py --prompts v3` | Letters **A–D**, but defined differently from v1's |
+| `v4` | `chained.py --prompts v4`, `batch.py` | No letters, **three** requirements — v2's fourth (contradiction between two parts of a contract) is missing |
+
+So the answer to "which categories does this run use" is not the same across the chain, and
+`v2` and `v4` do not use letters at all: they echo back the requirement sentence itself.
+
+The lettered scheme, as `v1` defines it, is a decision tree. A through D are meant to be
+mutually exclusive, so an argument is sorted into whichever one it fits; E catches whatever
+fits none of them:
 
 ```mermaid
 flowchart TD
