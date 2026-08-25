@@ -8,28 +8,60 @@ was made (categories A–E), emitting structured JSON.
 ## Repository layout
 
 ```
-data/                        # Raw court opinions, one .txt per citation (e.g. "331 F.Supp.3d 263.txt")
-gpt_unbatched.py             # Main single-prompt pipeline: opinion -> argument JSON
-utils/                       # Reusable helpers and API plumbing
-  gpt_batch_format.py        #   Build a .jsonl request file for the OpenAI Batch API
-  gpt_batch_process.py       #   Upload, poll, and download a batch job
-  o1_structured_input_ref.py #   Multi-step o1 run with a reference archive of prior steps
-  assistants.py              #   Assistants API + shelve-backed thread persistence
-  gemini_vertex.py           #   Vertex AI / Gemini variant of the same task
-  check.py                   #   Scratch client for one-off API checks
-versions/                    # Prompt + pipeline variants kept for comparison
-  script_text.py             #   Prompt parts 1-4 (Motions -> Issues -> Loci -> Arguments)
-  script_text_variant.py     #   Alternative wording of the same four parts
-  o1_structured_input.py     #   4-step chained pipeline on o1-preview
-  step_4.py                  #   Re-runs only the final step
-  gpt-4-turbo_unbatched.py   #   Same chain on gpt-4-turbo
-  structured_input_variant.py#   Variant chain with CSV-based resume/caching
-  storage_init.py            #   Initialize the CSV cache
-  revise_csv.py              #   Ad-hoc CSV cleanup
-  hier_summary/              # Hierarchical-summarization approach for long opinions
-    chunk_inputs.py          #   Split opinions on section headings
-    recursive_summarize.py   #   Summarize chunks, then summarize the summaries
+prompts/                     # ALL prompt text, versioned. No prompt literals live outside here.
+  v1_single_prompt.py        #   v1: whole task in one long prompt (context1, context2)
+  v2_chained.py              #   v2: four chained steps, canonical wording (part_1..part_4)
+  v3_chained_variant.py      #   v3: four steps reworded, + REVISED_STEP_* condensed restatements
+  v4_flat_chained.py         #   v4: v2's steps flattened to one line each, for the Batch API
+  qa_questions.py            #   Preamble + six fixed questions asked in sequence
+  summarization.py           #   Hierarchical-summarization system/user messages
+pipelines/                   # Runnable entry points, one per transport
+  chained.py                 #   Four-step chain; --prompts v2|v3|v4, --model, --only-step
+  single_prompt.py           #   v1: whole task in one call, run twice as an A-E ablation
+  batch.py                   #   v4 via the Batch API: format requests, submit, collect
+  interview.py               #   Six-question Gemini chat session per opinion
+  summarize.py               #   Hierarchical summarization for opinions past the context window
+lib/                         # Shared helpers, no entry points
+  batch_api.py               #   Upload, poll, download a batch job
+  chunking.py                #   Split an opinion on its numbered section headings
+data/                        # Raw court opinions, one .txt per citation ("331 F.Supp.3d 263.txt")
+dataset.py                   # Builds labels.csv from data/, and the single shared corpus loader
 ```
+
+### How the pipelines differ
+
+Three things vary across runs: the **prompt version**, the **model**, and the
+**transport** (how many calls, and whether they chain). Only transport changes the
+shape of the code, so only transport gets a file — prompt version and model are flags:
+
+```bash
+python -m pipelines.chained --prompts v2 --model o1-preview
+python -m pipelines.chained --prompts v4 --model gpt-4-turbo
+python -m pipelines.chained --prompts v2 --only-step 4     # reuse cached steps 1-3
+```
+
+`chained.py` caches every step by `(citation, model, step)` in its `--steps` file, so an
+interrupted run resumes where it stopped and never pays for a step twice. Delete that file
+to force a clean run.
+
+The prompt version also selects how each step's messages are built. v2 and v4 accumulate one
+growing conversation; v3 restarts at every step from a condensed restatement of what came
+before (its `REVISED_STEP_*` prompts) to keep the context small. `chained.py` picks this up
+from the prompt module rather than needing a flag.
+
+### Prompt versioning
+
+Every prompt is a named constant in `prompts/`, imported explicitly by the script
+that runs it:
+
+```python
+from prompts.v2_chained import part_1, part_2, part_3, part_4
+```
+
+So the import line of any script tells you which prompt version that run used, and
+editing a prompt is a one-file diff that shows exactly which pipelines it affects.
+`prompts.VERSIONS` lists the four pipeline versions in order.
+
 
 ## Setup
 
@@ -44,41 +76,57 @@ All scripts read the key from `OPENAI_API_KEY`; none contain credentials.
 
 ## Data
 
-`data/` holds the opinion texts. Scripts also expect a `labels.csv` in the working directory
-with columns `citation`, `text`, `corrected_labels`. When an opinion's `text` cell is truncated
-(<= 100 chars), the loader falls back to `data/<citation>.txt`. CSV/JSONL files are
-gitignored, so they are not distributed with the repo.
+`data/` holds the opinion texts, one `.txt` per citation. `labels.csv` is the manifest the
+pipelines iterate over — it is gitignored, so build it from the corpus:
+
+```bash
+python -m dataset            # writes labels.csv from data/
+```
+
+| Column | Meaning |
+|---|---|
+| `citation` | Case identifier, e.g. `331 F.Supp.3d 263`; also the stem of the file in `data/` |
+| `text` | The opinion text; may be left blank |
+| `corrected_labels` | Human ground-truth label, filled in by hand |
+
+Re-running `python -m dataset` picks up new opinions in `data/` and carries over any labels
+you have already assigned (`--overwrite` discards them instead).
+
+Every pipeline reads the manifest through `dataset.load_samples()`, which returns one
+`{"citation", "text", "label"}` dict per case. Where a row's `text` cell is blank or truncated
+(<= 100 chars) it falls back to `data/<citation>.txt`, so the CSV can carry just citations and
+labels. A case with no usable text from either source is reported by citation and dropped
+rather than sent to a model as an empty opinion.
 
 ## Running
 
-Scripts use relative imports and relative paths, so run each from its own directory:
+Everything resolves paths from the repo root, so run pipelines as modules from the root:
 
 ```bash
-# Single-prompt extraction
-python gpt_unbatched.py
+python -m dataset                          # build labels.csv from data/ (once)
 
-# 4-step chained pipeline
-cd versions && python o1_structured_input.py
-
-# Batch API: format requests, then submit and collect
-cd utils && python gpt_batch_format.py && python gpt_batch_process.py
-
-# Long-opinion hierarchical summarization
-cd versions/hier_summary && python recursive_summarize.py
+python -m pipelines.chained --prompts v2   # the four-step chain
+python -m pipelines.single_prompt          # v1, one call per opinion
+python -m pipelines.batch                  # v4 through the Batch API
+python -m pipelines.interview              # six-question Gemini session
+python -m pipelines.summarize              # summarize long opinions
 ```
 
-Model names and output filenames are set in each script's `__main__` block.
+Add `--help` to any of them for the available flags, and `--limit N` to `chained.py` to try
+a few cases before committing to a full run.
 
 ## Approach
 
 Two families of pipelines share the same task:
 
-1. **Single prompt** (`gpt_unbatched.py`) — one long instruction defining Contract, Locus, and
-   argument categories A–E; the model returns the full JSON array in one call.
-2. **Chained steps** (`versions/o1_structured_input.py` and friends) — four prompts run in
-   sequence, each consuming the previous output: extract motions, derive the issues per motion,
-   locate the disputed loci, then classify the arguments. Intermediate steps are written to a
-   separate `*_steps.jsonl` so a run can be inspected or resumed.
+1. **Single prompt** (`pipelines/single_prompt.py`) — one long instruction defining Contract,
+   Locus, and argument categories A–E; the model returns the full JSON array in one call. It
+   runs each opinion twice, with and without category E (the "fits none of A–D" catch-all), as
+   an ablation on whether that escape hatch helps.
+2. **Chained steps** (`pipelines/chained.py`) — four prompts run in sequence, each consuming
+   the previous output: extract the motions, derive the issues per motion, build the argument
+   trees, then pick out the disputes that turn on contract language.
 
-`versions/hier_summary/` handles opinions that exceed the context window by chunking on
-numbered section headings and summarizing recursively before extraction.
+`pipelines/interview.py` drops the chain entirely and asks six fixed questions in one Gemini
+chat session instead. `pipelines/summarize.py` handles opinions that exceed the context window
+by chunking on numbered section headings and summarizing recursively before extraction.
